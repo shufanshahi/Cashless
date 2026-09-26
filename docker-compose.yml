@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${DB_NAME:-cashless_wallet}
+      POSTGRES_USER: ${DB_USER:-cashless}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cashless}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Host port 5433, not 5432, so this doesn't collide with a Postgres
+    # already running on the host (as it does in local dev for this project).
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cashless}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Overrides .env's DB_HOST=localhost: inside the compose network the
+      # database is reachable at the service name "db", not localhost.
+      DB_HOST: db
+      DB_PORT: 5432
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
