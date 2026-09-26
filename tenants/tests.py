@@ -12,6 +12,11 @@ class TenantCreationTests(APITestCase):
         self.assertIn("api_key", response.data)
         self.assertEqual(len(response.data["api_key"]), 64)
 
+    def test_create_tenant_without_name_returns_400(self):
+        response = self.client.post("/api/tenants/", {})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("name", response.data)
+
 
 class TenantAuthenticationTests(APITestCase):
     def setUp(self):

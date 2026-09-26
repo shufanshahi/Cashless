@@ -75,6 +75,24 @@ class DepositEndpointTests(WalletApiTestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_deposit_negative_amount_returns_400(self):
+        response = self.client.post(
+            f"/api/wallets/{self.wallet.id}/deposit/",
+            {"amount": -500, "idempotency_key": "dep-api-neg"},
+            **self.auth(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, 1000)
+
+    def test_deposit_non_numeric_amount_returns_400(self):
+        response = self.client.post(
+            f"/api/wallets/{self.wallet.id}/deposit/",
+            {"amount": "lots", "idempotency_key": "dep-api-nan"},
+            **self.auth(),
+        )
+        self.assertEqual(response.status_code, 400)
+
     def test_cannot_deposit_into_another_tenants_wallet(self):
         response = self.client.post(
             f"/api/wallets/{self.other_wallet.id}/deposit/",
@@ -183,3 +201,28 @@ class TransactionHistoryEndpointTests(WalletApiTestCase):
             f"/api/wallets/{self.other_wallet.id}/transactions/", **self.auth(self.tenant)
         )
         self.assertEqual(response.status_code, 404)
+
+
+class CreationValidationTests(WalletApiTestCase):
+    def test_create_wallet_owner_without_name_returns_400(self):
+        response = self.client.post("/api/wallet-owners/", {}, **self.auth())
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("name", response.data)
+
+    def test_create_wallet_without_owner_returns_400(self):
+        response = self.client.post("/api/wallets/", {}, **self.auth())
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("owner", response.data)
+
+    def test_create_wallet_ignores_client_supplied_tenant_and_balance(self):
+        # tenant and balance aren't even writable fields on the serializer,
+        # so passing them must be silently ignored rather than honored.
+        response = self.client.post(
+            "/api/wallets/",
+            {"owner": str(self.owner.id), "balance": 999999, "tenant": str(self.other_tenant.id)},
+            **self.auth(),
+        )
+        self.assertEqual(response.status_code, 201)
+        wallet = Wallet.objects.get(id=response.data["id"])
+        self.assertEqual(wallet.tenant_id, self.tenant.id)
+        self.assertEqual(wallet.balance, 0)
