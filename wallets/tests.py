@@ -5,14 +5,15 @@ from django.test import TestCase, TransactionTestCase
 
 from tenants.models import Tenant
 
-from . import services
+from . import commands, services
 from .exceptions import (
     InsufficientFundsError,
     InvalidAmountError,
     SameWalletTransferError,
     WalletNotFoundError,
 )
-from .models import Transaction, Wallet, WalletOwner
+from .idempotency import IdempotencyConflictError
+from .models import IdempotencyKey, Transaction, Wallet, WalletOwner
 
 
 class DepositTests(TestCase):
@@ -201,3 +202,128 @@ class ConcurrencyTests(TransactionTestCase):
         self.assertEqual(
             Transaction.objects.filter(wallet=self.wallet, idempotency_key="dup-key").count(), 1
         )
+
+    def test_concurrent_identical_deposit_commands_replay_the_same_response(self):
+        # Five threads fire the exact same deposit_command call (same
+        # wallet, amount, idempotency_key). Exactly one should actually run
+        # the deposit; the rest must replay its cached response verbatim,
+        # not attempt a second deposit and fail.
+        responses = []
+        lock = threading.Lock()
+
+        def do_deposit():
+            body, status, replayed = commands.deposit_command(
+                tenant=self.tenant, wallet_id=self.wallet.id, amount=250, idempotency_key="concurrent-dep"
+            )
+            with lock:
+                responses.append((body, status, replayed))
+            connection.close()
+
+        threads = [threading.Thread(target=do_deposit) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.wallet.refresh_from_db()
+        self.assertEqual(len(responses), 5)
+        self.assertEqual(self.wallet.balance, 1250)
+        self.assertEqual(
+            Transaction.objects.filter(wallet=self.wallet, idempotency_key="concurrent-dep").count(), 1
+        )
+        # Every thread must have gotten back the identical response body.
+        first_body = responses[0][0]
+        for body, status, _replayed in responses:
+            self.assertEqual(body, first_body)
+            self.assertEqual(status, 201)
+        # Exactly one of the five actually executed the deposit.
+        self.assertEqual(sum(1 for _, _, replayed in responses if not replayed), 1)
+        self.assertEqual(sum(1 for _, _, replayed in responses if replayed), 4)
+
+
+class IdempotencyCommandTests(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Acme")
+        self.owner = WalletOwner.objects.create(tenant=self.tenant, name="Alice")
+        self.wallet = Wallet.objects.create(tenant=self.tenant, owner=self.owner, balance=1000)
+
+    def test_retry_with_identical_payload_replays_cached_response(self):
+        body1, status1, replayed1 = commands.deposit_command(
+            tenant=self.tenant, wallet_id=self.wallet.id, amount=300, idempotency_key="idem-1"
+        )
+        body2, status2, replayed2 = commands.deposit_command(
+            tenant=self.tenant, wallet_id=self.wallet.id, amount=300, idempotency_key="idem-1"
+        )
+
+        self.assertFalse(replayed1)
+        self.assertTrue(replayed2)
+        self.assertEqual(body1, body2)
+        self.assertEqual(status1, status2)
+
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, 1300)
+        self.assertEqual(Transaction.objects.filter(wallet=self.wallet).count(), 1)
+
+    def test_retry_with_different_payload_raises_conflict(self):
+        commands.deposit_command(
+            tenant=self.tenant, wallet_id=self.wallet.id, amount=300, idempotency_key="idem-2"
+        )
+        with self.assertRaises(IdempotencyConflictError):
+            commands.deposit_command(
+                tenant=self.tenant, wallet_id=self.wallet.id, amount=999, idempotency_key="idem-2"
+            )
+
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, 1300)  # only the first deposit applied
+        self.assertEqual(Transaction.objects.filter(wallet=self.wallet).count(), 1)
+
+    def test_failed_attempt_does_not_permanently_consume_the_key(self):
+        with self.assertRaises(InsufficientFundsError):
+            commands.withdraw_command(
+                tenant=self.tenant, wallet_id=self.wallet.id, amount=999999, idempotency_key="idem-3"
+            )
+
+        # The failed attempt must leave no trace: not the ledger, not the
+        # idempotency record. A retry with the same key should be free to
+        # succeed once the underlying condition is fixed.
+        self.assertEqual(Transaction.objects.filter(wallet=self.wallet).count(), 0)
+        self.assertEqual(IdempotencyKey.objects.filter(key="idem-3").count(), 0)
+
+        body, status, replayed = commands.withdraw_command(
+            tenant=self.tenant, wallet_id=self.wallet.id, amount=400, idempotency_key="idem-3"
+        )
+        self.assertFalse(replayed)
+        self.assertEqual(status, 201)
+
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, 600)
+
+    def test_transfer_command_is_idempotent_across_both_legs(self):
+        owner_b = WalletOwner.objects.create(tenant=self.tenant, name="Bob")
+        wallet_b = Wallet.objects.create(tenant=self.tenant, owner=owner_b, balance=0)
+
+        body1, _, replayed1 = commands.transfer_command(
+            tenant=self.tenant,
+            from_wallet_id=self.wallet.id,
+            to_wallet_id=wallet_b.id,
+            amount=200,
+            idempotency_key="idem-transfer",
+        )
+        body2, _, replayed2 = commands.transfer_command(
+            tenant=self.tenant,
+            from_wallet_id=self.wallet.id,
+            to_wallet_id=wallet_b.id,
+            amount=200,
+            idempotency_key="idem-transfer",
+        )
+
+        self.assertFalse(replayed1)
+        self.assertTrue(replayed2)
+        self.assertEqual(body1, body2)
+
+        self.wallet.refresh_from_db()
+        wallet_b.refresh_from_db()
+        self.assertEqual(self.wallet.balance, 800)
+        self.assertEqual(wallet_b.balance, 200)
+        self.assertEqual(Transaction.objects.filter(wallet=self.wallet).count(), 1)
+        self.assertEqual(Transaction.objects.filter(wallet=wallet_b).count(), 1)
