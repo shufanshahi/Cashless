@@ -151,4 +151,5 @@ REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
+    'EXCEPTION_HANDLER': 'wallets.api_exceptions.custom_exception_handler',
 }
