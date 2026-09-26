@@ -243,7 +243,7 @@ in `wallets/tests.py`).
 **Why UUID primary keys.** Sequential integer ids would let one tenant
 guess how many tenants/wallets exist elsewhere on the platform, or guess
 another tenant's object ids to probe with. UUIDs avoid that for free.
-
+<!-- 
 ## Assumptions
 
 - **Single currency semantics.** `Wallet.currency` exists and defaults to
@@ -315,4 +315,4 @@ Given the ~4–5 hour time-box, these were deliberately left out:
   audit trail for money movement; nothing else in the system needs one)
 - API versioning, OpenAPI/Swagger schema generation
 - Production-grade deployment config (gunicorn/nginx, secrets management,
-  HTTPS termination) — Docker Compose here is for local dev convenience only
+  HTTPS termination) — Docker Compose here is for local dev convenience only -->
