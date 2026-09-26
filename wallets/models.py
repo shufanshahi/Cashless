@@ -13,6 +13,7 @@ class WalletOwner(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        ordering = ["-created_at"]
         constraints = [
             models.UniqueConstraint(
                 fields=["tenant", "external_ref"],
@@ -34,6 +35,7 @@ class Wallet(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        ordering = ["-created_at"]
         constraints = [
             models.CheckConstraint(condition=models.Q(balance__gte=0), name="wallet_balance_non_negative"),
         ]
