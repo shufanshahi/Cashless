@@ -1,4 +1,5 @@
 asgiref==3.12.1
+coverage==7.16.1
 Django==6.1.1
 djangorestframework==3.18.1
 factory_boy==3.3.3
@@ -9,6 +10,7 @@ pluggy==1.6.0
 psycopg2-binary==2.9.13
 Pygments==2.21.0
 pytest==9.1.1
+pytest-cov==7.1.0
 pytest-django==4.14.0
 python-decouple==3.8
 sqlparse==0.6.0

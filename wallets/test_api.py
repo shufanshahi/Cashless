@@ -23,6 +23,23 @@ class WalletApiTestCase(APITestCase):
         return {"HTTP_AUTHORIZATION": f"Api-Key {tenant.api_key}"}
 
 
+class WalletAndOwnerHappyPathTests(WalletApiTestCase):
+    def test_create_wallet_owner_returns_201(self):
+        response = self.client.post("/api/wallet-owners/", {"name": "Dave"}, **self.auth())
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(WalletOwner.objects.get(id=response.data["id"]).tenant_id, self.tenant.id)
+
+    def test_create_wallet_returns_201(self):
+        response = self.client.post("/api/wallets/", {"owner": str(self.owner.id)}, **self.auth())
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["balance"], 0)
+
+    def test_get_wallet_detail_returns_balance(self):
+        response = self.client.get(f"/api/wallets/{self.wallet.id}/", **self.auth())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["balance"], 1000)
+
+
 class DepositEndpointTests(WalletApiTestCase):
     def test_deposit_increases_balance(self):
         response = self.client.post(

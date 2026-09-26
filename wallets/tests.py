@@ -1,4 +1,5 @@
 import threading
+import uuid
 
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
@@ -36,6 +37,12 @@ class DepositTests(TestCase):
         with self.assertRaises(InvalidAmountError):
             services.deposit(tenant=self.tenant, wallet_id=self.wallet.id, amount=0, idempotency_key="dep-2")
 
+    def test_deposit_into_nonexistent_wallet_raises(self):
+        with self.assertRaises(WalletNotFoundError):
+            services.deposit(
+                tenant=self.tenant, wallet_id=uuid.uuid4(), amount=100, idempotency_key="dep-3"
+            )
+
 
 class WithdrawTests(TestCase):
     def setUp(self):
@@ -60,6 +67,12 @@ class WithdrawTests(TestCase):
         self.wallet.refresh_from_db()
         self.assertEqual(self.wallet.balance, 1000)
         self.assertEqual(Transaction.objects.filter(wallet=self.wallet).count(), 0)
+
+    def test_withdraw_from_nonexistent_wallet_raises(self):
+        with self.assertRaises(WalletNotFoundError):
+            services.withdraw(
+                tenant=self.tenant, wallet_id=uuid.uuid4(), amount=100, idempotency_key="wd-3"
+            )
 
 
 class TransferTests(TestCase):
@@ -172,6 +185,58 @@ class ConcurrencyTests(TransactionTestCase):
         self.assertEqual(results.count("insufficient"), 1)
         self.assertEqual(self.wallet.balance, 200)
         self.assertEqual(Transaction.objects.filter(wallet=self.wallet).count(), 1)
+
+    def test_concurrent_opposite_direction_transfers_do_not_deadlock(self):
+        # Two threads repeatedly transfer the same pair of wallets in
+        # opposite directions (A->B and B->A) at the same time. If the two
+        # legs of a transfer locked their wallets in request order instead
+        # of a consistent id order, this is exactly the pattern that
+        # deadlocks: thread 1 holds A waiting for B while thread 2 holds B
+        # waiting for A. Postgres's default deadlock_timeout is ~1s, so a
+        # real deadlock would surface here as an OperationalError and/or a
+        # thread that never finishes.
+        wallet_a = self.wallet
+        owner_b = WalletOwner.objects.create(tenant=self.tenant, name="Bob")
+        wallet_b = Wallet.objects.create(tenant=self.tenant, owner=owner_b, balance=1000)
+
+        iterations = 20
+        errors = []
+
+        def transfer_loop(from_wallet, to_wallet, key_prefix):
+            for i in range(iterations):
+                try:
+                    services.transfer(
+                        tenant=self.tenant,
+                        from_wallet_id=from_wallet.id,
+                        to_wallet_id=to_wallet.id,
+                        amount=10,
+                        idempotency_key=f"{key_prefix}-{i}",
+                    )
+                except Exception as exc:  # noqa: BLE001 - capturing any DB-level error, not just ours
+                    errors.append(exc)
+                finally:
+                    connection.close()
+
+        t1 = threading.Thread(target=transfer_loop, args=(wallet_a, wallet_b, "a-to-b"))
+        t2 = threading.Thread(target=transfer_loop, args=(wallet_b, wallet_a, "b-to-a"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+
+        self.assertFalse(t1.is_alive(), "A->B transfer thread appears to have deadlocked")
+        self.assertFalse(t2.is_alive(), "B->A transfer thread appears to have deadlocked")
+        self.assertEqual(errors, [])
+
+        wallet_a.refresh_from_db()
+        wallet_b.refresh_from_db()
+        # Equal numbers of 10-unit transfers each way net to zero change.
+        self.assertEqual(wallet_a.balance, 1000)
+        self.assertEqual(wallet_b.balance, 1000)
+        self.assertEqual(
+            Transaction.objects.filter(tenant=self.tenant, type=Transaction.Type.TRANSFER_OUT).count(),
+            iterations * 2,
+        )
 
     def test_concurrent_duplicate_idempotency_key_deposits_only_apply_once(self):
         # Five threads fire the *same* idempotency_key concurrently. The
